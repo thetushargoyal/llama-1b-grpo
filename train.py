@@ -1,106 +1,15 @@
-# train_grpo.py
-import re
-from datasets import load_dataset, Dataset
+# Some parts of the code are taken from https://gist.github.com/willccbb/4676755236bb08cab5f4e54a0475d6fb and HuggingFace/open-r1 Implementation
+
 from transformers import AutoTokenizer
 from peft import LoraConfig
 from trl import GRPOConfig, GRPOTrainer
+from utils import *
+from reward_funcs import *
+from load_dataset import get_gsm8k_questions
 
 # Load and prep dataset
-
-SYSTEM_PROMPT = """
-Respond in the following format:
-<reasoning>
-...
-</reasoning>
-<answer>
-...
-</answer>
-"""
-
-XML_COT_FORMAT = """\
-<reasoning>
-{reasoning}
-</reasoning>
-<answer>
-{answer}
-</answer>
-"""
-
-def extract_xml_answer(text: str) -> str:
-    answer = text.split("<answer>")[-1]
-    answer = answer.split("</answer>")[0]
-    return answer.strip()
-
-def extract_hash_answer(text: str) -> str | None:
-    if "####" not in text:
-        return None
-    return text.split("####")[1].strip()
-
-def get_gsm8k_questions(split = "train") -> Dataset:
-    data = load_dataset('openai/gsm8k', 'main')[split] # type: ignore
-    data = data.map(lambda x: { # type: ignore
-        'prompt': [
-            {'role': 'system', 'content': SYSTEM_PROMPT},
-            {'role': 'user', 'content': 'What is the largest single-digit prime number?'},
-            {'role': 'assistant', 'content': XML_COT_FORMAT.format(
-                reasoning="9 is divisble by 3 and 8 is divisible by 2, but 7 is prime.",
-                answer="7"
-            )},
-            {'role': 'user', 'content': x['question']}
-        ],
-        'answer': extract_hash_answer(x['answer'])
-    }) # type: ignore
-    return data # type: ignore
-
 dataset = get_gsm8k_questions()
-
-# print(dataset[0]['prompt'][3])
-
-# Reward functions
-def correctness_reward_func(prompts, completions, answer, **kwargs) -> list[float]:
-    responses = [completion[0]['content'] for completion in completions]
-    q = prompts[0][-1]['content']
-    extracted_responses = [extract_xml_answer(r) for r in responses]
-    print('-'*20, f"Question:\n{q}", f"\nAnswer:\n{answer[0]}", f"\nResponse:\n{responses[0]}", f"\nExtracted:\n{extracted_responses[0]}")
-    return [2.0 if r == a else 0.0 for r, a in zip(extracted_responses, answer)]
-
-def int_reward_func(completions, **kwargs) -> list[float]:
-    responses = [completion[0]['content'] for completion in completions]
-    extracted_responses = [extract_xml_answer(r) for r in responses]
-    return [0.5 if r.isdigit() else 0.0 for r in extracted_responses]
-
-def strict_format_reward_func(completions, **kwargs) -> list[float]:
-    """Reward function that checks if the completion has a specific format."""
-    pattern = r"^<reasoning>\n.*?\n</reasoning>\n<answer>\n.*?\n</answer>\n$"
-    responses = [completion[0]["content"] for completion in completions]
-    matches = [re.match(pattern, r) for r in responses] 
-    return [0.5 if match else 0.0 for match in matches]
-
-def soft_format_reward_func(completions, **kwargs) -> list[float]:
-    """Reward function that checks if the completion has a specific format."""
-    pattern = r"<reasoning>.*?</reasoning>\s*<answer>.*?</answer>"
-    responses = [completion[0]["content"] for completion in completions]
-    matches = [re.match(pattern, r) for r in responses] 
-    return [0.5 if match else 0.0 for match in matches]
     
-def count_xml(text) -> float:
-    count = 0.0
-    if text.count("<reasoning>\n") == 1:
-        count += 0.125
-    if text.count("\n</reasoning>\n") == 1:
-        count += 0.125
-    if text.count("\n<answer>\n") == 1:
-        count += 0.125
-        count -= len(text.split("\n</answer>\n")[-1])*0.001
-    if text.count("\n</answer>") == 1:
-        count += 0.125
-        count -= (len(text.split("\n</answer>")[-1]) - 1)*0.001
-    return count
-
-def xmlcount_reward_func(completions, **kwargs) -> list[float]:
-    contents = [completion[0]["content"] for completion in completions]
-    return [count_xml(c) for c in contents]
-
 training_args = GRPOConfig(
     output_dir="outputs/Llama-1B-base-GRPO",
     run_name="Llama-1B-base-GRPO-gsm8k",
@@ -116,9 +25,10 @@ training_args = GRPOConfig(
     num_generations=12,
     max_completion_length=512,
     max_grad_norm=0.01,
-    # report_to="wandb",
+    report_to="wandb",
     log_on_each_node=False,
 )
+
 peft_config = LoraConfig(
     r=16,
     lora_alpha=64,
@@ -126,6 +36,7 @@ peft_config = LoraConfig(
     task_type="CAUSAL_LM",
     lora_dropout=0.05,
 )
+
 model_name = "meta-llama/Llama-3.2-1B"
 tokenizer = AutoTokenizer.from_pretrained(model_name + "-Instruct")
 tokenizer.pad_token = tokenizer.eos_token
@@ -140,6 +51,6 @@ trainer = GRPOTrainer(
         correctness_reward_func],
     args=training_args,
     train_dataset=dataset,
-    #peft_config=peft_config
+    peft_config=peft_config
 )
 trainer.train()
