@@ -1,15 +1,16 @@
 # Some parts of the code are taken from https://gist.github.com/willccbb/4676755236bb08cab5f4e54a0475d6fb and HuggingFace/open-r1 Implementation
 
-from transformers import AutoTokenizer
-from peft import LoraConfig
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from peft import LoraConfig, get_peft_model
 from trl import GRPOConfig, GRPOTrainer
 from utils import *
 from reward_funcs import *
 from load_dataset import get_gsm8k_questions
+import torch
 
 # Load and prep dataset
 dataset = get_gsm8k_questions()
-    
+
 training_args = GRPOConfig(
     output_dir="outputs/Llama-1B-base-GRPO",
     run_name="Llama-1B-base-GRPO-gsm8k",
@@ -25,7 +26,7 @@ training_args = GRPOConfig(
     num_generations=12,
     max_completion_length=512,
     max_grad_norm=0.01,
-    report_to="wandb",
+    # report_to="wandb",
     log_on_each_node=False,
 )
 
@@ -38,10 +39,20 @@ peft_config = LoraConfig(
 )
 
 model_name = "meta-llama/Llama-3.2-1B"
-tokenizer = AutoTokenizer.from_pretrained(model_name + "-Instruct")
+
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+)
+
+model = get_peft_model(model, peft_config)
+# print(model.print_trainable_parameters())
+
+tokenizer = AutoTokenizer.from_pretrained(model_name + '-Instruct')
 tokenizer.pad_token = tokenizer.eos_token
+
+
 trainer = GRPOTrainer(
-    model=model_name,
+    model=model,
     processing_class=tokenizer,
     reward_funcs=[
         xmlcount_reward_func,
@@ -51,6 +62,5 @@ trainer = GRPOTrainer(
         correctness_reward_func],
     args=training_args,
     train_dataset=dataset,
-    peft_config=peft_config
 )
 trainer.train()
