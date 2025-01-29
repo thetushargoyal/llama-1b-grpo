@@ -1,6 +1,6 @@
 # Some parts of the code are taken from https://gist.github.com/willccbb/4676755236bb08cab5f4e54a0475d6fb and HuggingFace/open-r1 Implementation
 
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model
 from trl import GRPOConfig, GRPOTrainer
 from utils import *
@@ -10,6 +10,13 @@ import torch
 
 # Load and prep dataset
 dataset = get_gsm8k_questions()
+
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.bfloat16,
+    bnb_4bit_quant_storage=torch.bfloat16,
+)
 
 training_args = GRPOConfig(
     output_dir="outputs/Llama-1B-base-GRPO",
@@ -31,20 +38,23 @@ training_args = GRPOConfig(
 )
 
 peft_config = LoraConfig(
-    r=16,
-    lora_alpha=64,
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj", "gate_proj"],
+    lora_alpha=16,
+    lora_dropout=0.1,
+    r=64,
+    bias="none",
     task_type="CAUSAL_LM",
-    lora_dropout=0.05,
+    target_modules="all-linear",
 )
 
 model_name = "meta-llama/Llama-3.2-1B"
 
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
+    quantization_config=bnb_config,
+    torch_dtype=torch.bfloat16,
 )
 
-model = get_peft_model(model, peft_config)
+# model = get_peft_model(model, peft_config)
 # print(model.print_trainable_parameters())
 
 tokenizer = AutoTokenizer.from_pretrained(model_name + '-Instruct')
@@ -62,5 +72,6 @@ trainer = GRPOTrainer(
         correctness_reward_func],
     args=training_args,
     train_dataset=dataset,
+    peft_config=peft_config,
 )
 trainer.train()
